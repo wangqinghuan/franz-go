@@ -1,4 +1,4 @@
-module github.com/twmb/franz-go
+module github.com/wangqinghuan/franz-go
 
 go 1.13
 
