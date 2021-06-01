@@ -82,7 +82,7 @@ func (k k) Authenticate(ctx context.Context, host string) (sasl.Session, []byte,
 		}
 	}
 
-	ticket, encKey, err := c.GetServiceTicket(auther.Service + "/" + host)
+	ticket, encKey, err := c.GetServiceTicket(auther.Service + "/hadoop.botech.com"  )
 	if err != nil {
 		return nil, nil, err
 	}
