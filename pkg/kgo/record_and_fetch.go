@@ -261,18 +261,18 @@ type FetchError struct {
 //
 func (fs Fetches) Errors() []FetchError {
 	var errs []FetchError
-	fs.EachError(func(t string, p int32, err error) {
+	fs.EachErr(func(t string, p int32, err error) {
 		errs = append(errs, FetchError{t, p, err})
 	})
 	return errs
 }
 
-// EachError calls fn for every partition that had a fetch error with the
+// EachErr calls fn for every partition that had a fetch error with the
 // topic, partition, and error.
 //
 // This function has the same semantics as the Errors function; refer to the
 // documentation on that function for what types of errors are possible.
-func (fs Fetches) EachError(fn func(string, int32, error)) {
+func (fs Fetches) EachErr(fn func(string, int32, error)) {
 	for _, f := range fs {
 		for _, ft := range f.Topics {
 			for _, fp := range ft.Partitions {
