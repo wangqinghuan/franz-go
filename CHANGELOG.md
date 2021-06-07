@@ -1,3 +1,47 @@
+v0.7.9
+===
+
+- [`5231902`](https://github.com/twmb/franz-go/commit/5231902) **bugfix** patch on prior commit
+
+If I could yank tags, I would. Nice 10 minutes between them though! 🙃
+
+v0.7.8
+===
+
+- [`b7cb533`](https://github.com/twmb/franz-go/commit/b7cb533) **bugfix** allow any `*os.SyscallError` to be retriable
+
+_This_ should be the last v0.7 release. This is a small bugfix to allow much
+more retrying of failing requests, particularly around failed dials, which is
+much more resilient to restarting brokers.
+
+v0.7.7
+===
+
+- [`afa1209`](https://github.com/twmb/franz-go/commit/afa1209) txn: detect a fatal txnal client when beginning transactions
+- [`5576dce`](https://github.com/twmb/franz-go/commit/5576dce) benchmarks: add comparisons to confluent-kafka-go & sarama
+- [`d848174`](https://github.com/twmb/franz-go/commit/d848174) examples: add benchmarking example
+- [`fec2a18`](https://github.com/twmb/franz-go/commit/fec2a18) client: fix request buffer pool, add promisedNumberedRecord pool
+- [`a0d712e`](https://github.com/twmb/franz-go/commit/a0d712e) transactions: small wording changes in docs
+- [`bad47ba`](https://github.com/twmb/franz-go/commit/bad47ba) and [`a9691bd`](https://github.com/twmb/franz-go/commit/a9691bd) **feature** hooks: add HookBrokerE2E
+
+This is a small release with one useful new hook, a few minor updates /
+internal fixes, and no bug fixes.
+
+This now properly pools request buffers, which will reduce garbage when
+producing, and re-adds pooling slices that records are appended to before
+flushing. This latter pool is less important, but can help.
+
+This now adds one more chance to recover a transactional client, which also
+gives the user a chance to things are fatally failed when beginning
+transactions.
+
+Finally, this adds a benchmarking example and comparisons to sarama /
+confluent-kafka-go. To say the least, the numbers are favorable.
+
+This is likely the last release of the v0.7 series, the next change will be a
+few breaking API changes that should hopefully simplify initializing a
+consumer.
+
 v0.7.6
 ===
 

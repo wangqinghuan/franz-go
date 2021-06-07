@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl/plain"
+	"github.com/segmentio/kafka-go/sasl/scram"
 )
 
 var (
@@ -19,6 +23,7 @@ var (
 
 	recordBytes   = flag.Int("record-bytes", 100, "bytes per record (producing)")
 	noCompression = flag.Bool("no-compression", false, "set to disable snappy compression (producing)")
+	poolProduce   = flag.Bool("pool", false, "if true, use a sync.Pool to reuse record slices (producing)")
 
 	consume = flag.Bool("consume", false, "if true, consume rather than produce")
 	group   = flag.String("group", "", "if non-empty, group to use for consuming rather than direct partition consuming (consuming)")
@@ -59,12 +64,8 @@ func main() {
 
 	brokers := strings.Split(*seedBrokers, ",")
 
-	go printRate()
-
-	cfg := sarama.NewConfig()
-	cfg.Version = sarama.V2_8_0_0
 	if *dialTLS {
-		cfg.Net.TLS.Enable = true
+		kafka.DefaultDialer.TLS = new(tls.Config)
 	}
 	if *saslMethod != "" || *saslUser != "" || *saslPass != "" {
 		if *saslMethod == "" || *saslUser == "" || *saslPass == "" {
@@ -73,87 +74,95 @@ func main() {
 		method := strings.ToLower(*saslMethod)
 		method = strings.ReplaceAll(method, "-", "")
 		method = strings.ReplaceAll(method, "_", "")
-		cfg.Net.SASL.Enable = true
-		cfg.Net.SASL.Version = 1
-		cfg.Net.SASL.User = *saslUser
-		cfg.Net.SASL.Password = *saslPass
 		switch method {
 		case "plain":
-			cfg.Net.SASL.Mechanism = sarama.SASLTypePlaintext
+			kafka.DefaultDialer.SASLMechanism = plain.Mechanism{
+				Username: *saslUser,
+				Password: *saslPass,
+			}
 		case "scramsha256":
-			cfg.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA256
+			m, err := scram.Mechanism(
+				scram.SHA256,
+				*saslUser,
+				*saslPass,
+			)
+			chk(err, "scram-sha-256 err: %v", err)
+			kafka.DefaultDialer.SASLMechanism = m
 		case "scramsha512":
-			cfg.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA512
+			m, err := scram.Mechanism(
+				scram.SHA512,
+				*saslUser,
+				*saslPass,
+			)
+			chk(err, "scram-sha-512 err: %v", err)
+			kafka.DefaultDialer.SASLMechanism = m
 		default:
 			die("unrecognized sasl option %s", *saslMethod)
 		}
 	}
 
+	go printRate()
+
 	switch *consume {
 	case false:
-		cfg.Producer.RequiredAcks = sarama.WaitForAll
-		cfg.Producer.Compression = sarama.CompressionSnappy
-		cfg.Producer.Return.Successes = true
+		w := &kafka.Writer{
+			Addr:         kafka.TCP(brokers...),
+			Topic:        *topic,
+			RequiredAcks: -1,
+			Async:        true,
+			Completion: func(ms []kafka.Message, err error) {
+				chk(err, "produce err: %v", err)
+				for _, m := range ms {
+					atomic.AddInt64(&rateRecs, 1)
+					atomic.AddInt64(&rateBytes, int64(len(m.Value)))
 
-		p, err := sarama.NewAsyncProducer(brokers, cfg)
-		chk(err, "unable to create producer: %v", err)
-
-		go func() {
-			for err := range p.Errors() {
-				die("produce error: %v", err)
-			}
-		}()
-		go func() {
-			for range p.Successes() {
-				atomic.AddInt64(&rateRecs, 1)
-				atomic.AddInt64(&rateBytes, int64(*recordBytes))
-			}
-		}()
+					if *poolProduce {
+						p.Put(&m.Value)
+					}
+				}
+			},
+		}
+		if !*noCompression {
+			w.Compression = kafka.Snappy
+		}
 
 		var num int64
 		for {
-			p.Input() <- &sarama.ProducerMessage{Topic: *topic, Value: sarama.ByteEncoder(newValue(num))}
+			w.WriteMessages(context.Background(), kafka.Message{
+				Value: newValue(num),
+			})
 			num++
 		}
 
 	case true:
-		cfg.Consumer.Return.Errors = true
-		cfg.Consumer.Offsets.Initial = sarama.OffsetOldest
-
+		cfg := kafka.ReaderConfig{
+			Brokers:         brokers,
+			Topic:           *topic,
+			ReadLagInterval: -1,
+		}
+		if *group != "" {
+			cfg.GroupID = *group
+		}
+		r := kafka.NewReader(cfg)
 		if *group == "" {
-			c, err := sarama.NewConsumer(brokers, cfg)
-			chk(err, "unable to create consumer: %v", err)
-			ps, err := c.Partitions(*topic)
-			chk(err, "unable to get partitions for topic %s: %v", *topic, err)
-
-			for _, p := range ps {
-				go func(p int32) {
-					pc, err := c.ConsumePartition(*topic, p, sarama.OffsetOldest)
-					chk(err, "unable to consume topic %s partition %d: %v", *topic, p, err)
-					for {
-						msg := <-pc.Messages()
-						atomic.AddInt64(&rateRecs, 1)
-						atomic.AddInt64(&rateBytes, int64(len(msg.Value)))
-					}
-				}(p)
-			}
-			select {}
+			err := r.SetOffset(kafka.FirstOffset)
+			chk(err, "unable to set offset: %v", err)
 		}
-
-		g, err := sarama.NewConsumerGroup(brokers, *group, cfg)
-		chk(err, "unable to create group consumer: %v", err)
-
-		go func() {
-			for err := range g.Errors() {
-				chk(err, "consumer group error: %v", err)
-			}
-		}()
-
 		for {
-			err := g.Consume(context.Background(), []string{*topic}, new(consumer))
-			chk(err, "consumer group err: %v", err)
+			m, err := r.ReadMessage(context.Background())
+			chk(err, "unable to consume: %v", err)
+			atomic.AddInt64(&rateRecs, 1)
+			atomic.AddInt64(&rateBytes, int64(len(m.Value)))
 		}
+
 	}
+}
+
+var p = sync.Pool{
+	New: func() interface{} {
+		s := make([]byte, *recordBytes)
+		return &s
+	},
 }
 
 func newValue(num int64) []byte {
@@ -161,24 +170,16 @@ func newValue(num int64) []byte {
 	b := strconv.AppendInt(buf[:0], num, 10)
 	b = append(b, ' ')
 
-	s := make([]byte, *recordBytes)
+	var s []byte
+	if *poolProduce {
+		s = *(p.Get().(*[]byte))
+	} else {
+		s = make([]byte, *recordBytes)
+	}
 
 	var n int
 	for n != len(s) {
 		n += copy(s[n:], b)
 	}
 	return s
-}
-
-type consumer struct{}
-
-func (*consumer) Setup(sarama.ConsumerGroupSession) error   { return nil }
-func (*consumer) Cleanup(sarama.ConsumerGroupSession) error { return nil }
-func (*consumer) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	for msg := range claim.Messages() {
-		atomic.AddInt64(&rateRecs, 1)
-		atomic.AddInt64(&rateBytes, int64(len(msg.Value)))
-		sess.MarkMessage(msg, "")
-	}
-	return nil
 }
